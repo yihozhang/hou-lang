@@ -5,7 +5,7 @@
 (define-type Bindings (Listof (List Id Expr)))
 
 (struct Forall ([xs : (Listof Id)] [ts : (Listof Expr)] [e : Expr]) #:transparent)
-(struct Exists ([xs : (Listof Id)] [ts : (Listof Expr)] [e : Expr]) #:transparent)
+(struct Exists ([xs : Id] [t : Expr] [e : Expr]) #:transparent)
 (struct Lambda ([xs : (Listof Id)] [e : Expr]) #:transparent)
 
 (define-type  Expr
@@ -17,20 +17,30 @@
    ; (List '= Expr Expr Expr)
    '=
    'Nat
+   'Bot
    
    'U
    ; term
    ; nat 
-   'succ
+   (List 'succ Expr)
    'zero
-   'refl
-   'ind-=
+   (List 'refl Expr Expr)
+   (List 'ind-= Expr Expr Expr Expr Expr Expr Expr)
+   (List 'intro-ex Expr Expr Expr Expr)
+   (List 'elim-ex Expr Expr)
+   (List 'exfalso Expr Expr)
    ; var
    Id
    (Pairof Expr (Listof Expr))
    ))
 
 (define-type Context (Listof (List Id Expr)))
+
+(define debug? #t)
+
+(: debugln (-> String Void))
+(define (debugln s)
+  (when debug? (displayln (string-append "DEBUG: " s))))
 
 (: lookup (-> Context Id (Option Expr)))
 (define (lookup Γ x)
@@ -61,26 +71,20 @@
 
 (: fresh (-> (Setof Id) Id Id))
 (define (fresh s x)
+  (displayln (format "s: ~a\nx: ~a\n" s x))
   (let fresh* ([n 0])
     (let ([x+ (string->symbol (string-append (symbol->string x) (number->string n)))])
       (if (set-member? s x+)
           (fresh* (add1 n))
           x+))))
    
-
+; TODO: add computation rule for intro-ex and elim-ex
 (: normalize (-> Expr Expr))
 (define (normalize e)
   (match e
     [(Forall xs ts e1) (Forall xs (map normalize ts) (normalize e1))]
-    [(Exists xs ts e1) (Exists xs (map normalize ts) (normalize e1))]
+    [(Exists x t e1) (Exists x (normalize t) (normalize e1))]
     [(Lambda xs e1) (Lambda xs (normalize e1))]
-    ['= '=]
-    ['Nat 'Nat]
-    ['U 'U]
-    ['ind-= 'ind-=]
-    ['refl 'refl]
-    ['succ 'succ]
-    ['zero 'zero]
     [`(,#{rator : Expr} ,#{rands : (Listof Expr)} ...)
      (let ([rator+ : Expr (normalize rator)]
            [rands+ : (Listof Expr) (map normalize rands)])
@@ -106,18 +110,20 @@
             ; remove all xs from free variables of e1
             (set-subtract (free-vars e1) (apply set xs))
             (map free-vars ts))]
-    [(Exists xs ts e1)
-     (apply set-union
-            ; remove all xs from free variables of e1
-            (set-subtract (free-vars e1) (apply set xs))
-            (map free-vars ts))]
+    [(Exists x t e1)
+     (set-union (set-subtract (free-vars e1) (set x))
+                (free-vars t))]
     [(Lambda xs e1) (set-subtract (free-vars e1) (apply set xs))]
     ['refl (set)]
     ['= (set)]
     ['Nat (set)]
     ['U (set)]
+    ['Bot (set)]
     ['ind-= (set)]
+    ['intro-ex (set)]
+    ['elim-ex (set)]
     ['succ (set)]
+    ['exfalso (set)]
     ['zero (set)]
     [`(,rator ,#{rand : (Listof Expr)} ...) (apply set-union (free-vars rator) (map free-vars rand))]
     [x #:when (symbol? x) (set x)]))
@@ -172,16 +178,20 @@
     [(Forall ys ts e)
      (let-values ([(ys+ ts+ e+) (subst-qualifier ys ts e)])
        (Forall ys+ ts+ e+))]
-    [(Exists ys ts e)
-     (let-values ([(ys+ ts+ e+) (subst-qualifier ys ts e)])
-       (Exists ys+ ts+ e+))]
+    [(Exists y t e)
+     (let-values ([(y+ t+ e+) (subst-qualifier (list y) (list t) e)])
+       (Exists (car y+) (car t+) e+))]
     [(Lambda ys e)
      (let-values ([(ys+ _ e+) (subst-qualifier ys '() e)])
        (Lambda ys+ e+))]
     ['= '=]
     ['ind-= 'ind-=]
+    ['intro-ex 'intro-ex]
+    ['elim-ex 'elim-ex]
     ['Nat 'Nat]
     ['U 'U]
+    ['Bot 'Bot]
+    ['exfalso 'exfalso]
     ['refl 'refl]
     ['zero 'zero]
     ['succ 'succ]
@@ -218,14 +228,18 @@
     (match `(,v ,w)
       [(list (Forall xvs tvs ev) (Forall xws tws ew))
        (α-equiv-qualifier xvs tvs ev xws tws ew)]
-      [(list (Exists xvs tvs ev) (Exists xws tws ew))
-       (α-equiv-qualifier xvs tvs ev xws tws ew)]
+      [(list (Exists xv tv ev) (Exists xw tw ew))
+       (α-equiv-qualifier (list xv) (list tv) ev (list xw) (list tw) ew)]
       [(list (Lambda xvs ev) (Lambda xws ew))
        (α-equiv-qualifier xvs '() ev xws '() ew)]
       ['(= =) #t]
+      ['(Bot Bot) #t]
+      ['(exfalso exfalso) #t]
       ['(ind-= ind-=) #t]
       ['(Nat Nat) #t]
       ['(U U) #t]
+      ['(intro-ex intro-ex) #t]
+      ['(elim-ex elim-ex) #t]
       ['(zero zero) #t]
       ['(succ succ) #t]
       ['(refl refl) #t]
@@ -243,7 +257,7 @@
 ; return type will be a value
 (: infer (-> Context Expr (Option Expr)))
 (define (infer Γ e)
-  ; (printf "LOG: inferring ~a under ~a\n" e Γ)
+  (debugln (format "inferring ~a under ~a" e Γ))
   (define (infer-qualifier [xs : (Listof Id)] [ts : (Listof Expr)] [e : Expr]) : (Option 'U)
     (define (process [Γ : Context]
                      [xs : (Listof Id)]
@@ -259,7 +273,7 @@
     (if (and res (check Γ+ e 'U)) 'U #f))
   (match e
     [(Forall xs ts e) (infer-qualifier xs ts e)]
-    [(Exists xs ts e) (infer-qualifier xs ts e)]
+    [(Exists x t e) (infer-qualifier (list x) (list t) e)]
     ['= (Forall '(t lhs rhs) '(U t t) 'U)]
     ['ind-= (define args : Context
               `([A U]
@@ -272,6 +286,23 @@
                 [base (motive fr (refl A fr))]))
             (define-values (xs ts) (split-context args))
             (Forall xs ts '(motive to target))]
+    ['intro-ex (define args : Context
+                 `([A U]
+                   [P ,(Forall '(x) '(A) 'U)]
+                   [x A]
+                   [Px (P x)]))
+               (define-values (xs ts) (split-context args))
+               (Forall xs ts (Exists 'x 'A '(P x)))]
+    ['elim-ex (define args : Context
+                `([A U]
+                  [P ,(Forall '(x) '(A) 'U)]
+                  [base ,(Exists 'y 'A '(P y))]
+                  [B U]
+                  [f ,(Forall '(x e) '(A (P x)) 'B)]))
+              (define-values (xs ts) (split-context args))
+              (Forall xs ts 'B)]
+    ['exfalso (Forall '(bot A) '(Bot U) 'A)]
+    ['Bot 'U]
     ['Nat 'U]
     ['U 'U]
     [`(,#{rator : Expr} ,#{rands : (Listof Expr)} ...)
@@ -305,7 +336,7 @@
 ; t should be normalized
 (: check (-> Context Expr Expr Boolean))
 (define (check Γ e t)
-  ; (printf "LOG: checking ~a under ~a against type ~a\n" e Γ t)
+  (debugln (format "checking ~a under ~a against type ~a" e Γ t))
   (define t+ (normalize t))
   (match e
     [(Lambda ys e) (match t+
@@ -313,7 +344,7 @@
                      [(Forall xs ts t) (check (add-to-context Γ ys ts) e (substs+ xs ys t))]
                      [_ #f])]
     [e (mlet* ([inferred-t (infer Γ e)])
-              ; (printf "LOG: inferred-type for ~a under ~a is ~a\n" e Γ inferred-t)
+              (debugln (format "inferred-type for ~a under ~a is ~a" e Γ inferred-t))
               (α-equiv t+ Γ inferred-t Γ))]))
 
 (define-type Ast (U Symbol (Listof Ast)))
@@ -321,10 +352,19 @@
 (: Ast->Expr (-> Ast Expr))
 (define (Ast->Expr ast)
   (match ast
-    [`(forall ([,(? symbol? #{xs : (Listof Symbol)}) ,#{ts : (Listof Ast)}] ...) ,e) (Forall xs (map Ast->Expr ts) (Ast->Expr e))]
-    [`(exists ([,(? symbol? #{xs : (Listof Symbol)}) ,#{ts : (Listof Ast)}] ...) ,e) (Exists xs (map Ast->Expr ts) (Ast->Expr e))]
+    [`(forall ([,(? symbol? #{xs : (Listof Symbol)}) ,#{ts : (Listof Ast)}] ...) ,e)
+     (if (null? xs)
+         (Ast->Expr e)
+         (Forall xs (map Ast->Expr ts) (Ast->Expr e)))]
+    [`(exists ([,(? symbol? #{xs : (Listof Symbol)}) ,#{ts : (Listof Ast)}] ...) ,e)
+     (let self ([xs xs]
+                [ts ts])
+       (if (null? xs)
+           (Ast->Expr e)
+           (Exists (car xs) (Ast->Expr (car ts)) (self (cdr xs) (cdr ts)))))]
     [`(,(or 'lambda 'λ) (,(? symbol? #{xs : (Listof Symbol)}) ...) ,e) (Lambda xs (Ast->Expr e))]
     [`(,#{rator : Ast} ,#{rands : (Listof Ast)} ...) (cons (Ast->Expr rator) (map Ast->Expr rands))]
+    ['⊥ 'Bot]
     [(? symbol? x) x]))
 
 (define symm-ty : Expr
